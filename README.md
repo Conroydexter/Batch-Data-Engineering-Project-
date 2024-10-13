@@ -1,4 +1,4 @@
-# Batch-Data-Engineering-Project-
+# Batch-Data-Engineering-Project
 Building of a batch processing based data architecture for a data-intensive application, driven by: 
 Researchers from a network of hospitals seeking to investigate the average billing amount for patients admitted to an hospital within the network.
 The project is focused on the hospital and the billing amount listed on the date of discharge for each patient, more precisely to investigate the average bill amount by medical condition and hospital for insight into how the hospitals in the network are charging for various medical conditions.
