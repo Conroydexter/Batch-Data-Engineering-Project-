@@ -1,180 +1,287 @@
-from datetime import timedelta, datetime
+from datetime import datetime
 import time
-from prefect import task, Flow
-from prefect.schedules import IntervalSchedule
-from prefect.executors import LocalDaskExecutor
-import psycopg2
-import pandas
-from sklearn.cluster import KMeans
-import dbconfig
-from sqlalchemy import create_engine
-import dbstatus
 import os
+import logging
+import psycopg2
+from pyspark.sql import SparkSession
+from pyspark.ml.clustering import KMeans
+from pyspark.ml.feature import StringIndexer, VectorAssembler
+from pyspark.sql import functions as F
+from dotenv import load_dotenv
+import dbstatus
 
-@task(max_retries=3, retry_delay=timedelta(seconds=1))
-def createTable():
-    '''
-    Create the tables required by the ML process
-        - temperature_level to store cluster results
-    '''
-    # Open connection to the database
-    connection = psycopg2.connect(f"host='{dbconfig.HOST}' dbname='{dbconfig.DBNAME}' user='{dbconfig.USER}' password='{dbconfig.PASSWORD}'")
-    mycursor = connection.cursor()
-    
-    # Create table to store the temperature level data and delete any previous data
-    sql = """
-        create table IF NOT EXISTS temperature_level (region varchar(50), country varchar(30), city varchar(50), quarter int, avgtemp decimal, templevel varchar(10));
-        delete from temperature_level;
-        """
-    
-    # Execute the SQL statement + commit or rollback
+# Load environment variables from .env file
+load_dotenv()
+
+# Accessing PostgreSQL environment variables
+db_name = os.getenv('POSTGRES_DB')
+db_user = os.getenv('POSTGRES_USER')
+db_password = os.getenv('POSTGRES_PASSWORD')
+db_host = os.getenv('DB_HOST')
+db_port = os.getenv('DB_PORT')
+
+# Setting up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Initializing Spark session
+spark = SparkSession.builder \
+    .appName('Data_Engineering_Project') \
+    .config("spark.jars",
+            "C:\\Users\\admin\\PycharmProjects\\Data_Engineering_Project\\code\\libs\\postgresql-42.7.4.jar") \
+    .getOrCreate()
+
+
+def get_last_quarter():
+    """Retrieve the last quarter from the status table."""
+    connection = None
+    cursor = None
     try:
-        mycursor.execute(sql)
+        connection = psycopg2.connect(dbname=db_name, user=db_user, password=db_password, host=db_host, port=db_port)
+        cursor = connection.cursor()
+
+        cursor.execute("SELECT DISTINCT status FROM status ORDER BY timestamp DESC LIMIT 1;")
+        last_quarter = cursor.fetchone()
+
+        return last_quarter[0] if last_quarter else None
+    except Exception as e:
+        logger.error(f"Error retrieving last quarter: {e}")
+        return None
+    finally:
+        if cursor:
+            cursor.close()
+        if connection:
+            connection.close()
+
+
+def create_table():
+    """Create the required table for the ML process in the PostgreSQL database."""
+    connection = None
+    mycursor = None
+    try:
+        logger.info("Connecting to the database...")
+        connection = psycopg2.connect(dbname=db_name, user=db_user, password=db_password, host=db_host, port=db_port)
+        mycursor = connection.cursor()
+
+        # Check the current and last quarter
+        current_quarter = (datetime.now().month - 1) // 3 + 1
+        last_quarter = get_last_quarter()
+
+        if current_quarter != last_quarter:
+            logger.info("Dropping existing table due to new quarter...")
+            mycursor.execute('DROP TABLE IF EXISTS "Cat Bill Amount";')
+
+        # Create the Cat Bill Amount table
+        sql_create = """
+            CREATE TABLE IF NOT EXISTS "Cat Bill Amount" (
+                "Medical Condition" VARCHAR(60),
+                "Hospital" VARCHAR(60),
+                "Insurance Provider" VARCHAR(60),
+                "Quarter" INT,
+                "Avg Bill Amount" DECIMAL,
+                "Bill Cat" VARCHAR(20)
+            );
+        """
+        logger.info("Executing SQL to create tables...")
+        mycursor.execute(sql_create)
+        logger.info("Table created successfully.")
+
+        # Clear the table for fresh data
+        mycursor.execute("DELETE FROM \"Cat Bill Amount\";")
+        logger.info("Cleared Cat_Bill_Amount table.")
+
         connection.commit()
-    except:
-        connection.rollback()
-    
-    # Close connection
-    connection.close()
-    
-@task(max_retries=3, retry_delay=timedelta(seconds=1))
+        logger.info("Changes committed to the database.")
+
+    except Exception as e:
+        logger.error(f"Error occurred while creating table: {e}")
+        raise
+    finally:
+        if mycursor:
+            mycursor.close()
+        if connection:
+            connection.close()
+            logger.info("Database connection closed.")
+
+
 def extract():
-    '''
-    Extract data from temperatures table created by the ETL process
-    '''
-    # Wait for ETL process to complete
-    while (dbstatus.checkStatus(2)):
-        print("Waiting for ETL to finish...")
-        time.sleep(60)
+    """Extract data from the admission table."""
+    connection = None
+    mycursor = None
+    try:
+        # Wait for ETL process to finish
+        while dbstatus.checkStatus(2):
+            logger.info("Waiting for ETL to finish...")
+            time.sleep(60)
 
-    # Log status message
-    dbstatus.logStatus(3, "ML 1/2 - Process started")
+        logger.info("Logging process status: ML 1/2 - Process started")
+        dbstatus.logStatus(3, "ML 1/2 - Process started")
 
-    # Open connection to the database
-    alchemyEngine = create_engine(f'postgresql+psycopg2://{dbconfig.USER}:{dbconfig.PASSWORD}@{dbconfig.HOST}/{dbconfig.DBNAME}', pool_recycle=3600);
-    connection = alchemyEngine.connect();
-   
-    # Get the average temperature for each city per quarter
-    sql = """select region, country, city, quarter , round( avg(avgtemp),2) as avgtemp
-    from temperatures
-    group by region, country, city , quarter 
-    order by region, country, city, quarter ;
-    """
-    data = pandas.read_sql_query(sql,con=connection)
-    
-    # Close database connection
-    connection.close()
+        jdbc_url = f"jdbc:postgresql://{db_host}/{db_name}"
+        properties = {
+            "user": db_user,
+            "password": db_password,
+            "driver": "org.postgresql.Driver"
+        }
 
-    # Return queried data
-    return data
+        logger.info("Reading data from the admission table...")
+        data = spark.read.jdbc(url=jdbc_url, table="public.admission", properties=properties)
 
-@task
-def createModel(data):
-    '''
-    Run KMeans to clusterize the data into 5 categories based on their temperature per quarter
-    '''
-    # Set clusters based on temperature and quarter
-    model = KMeans(n_clusters=5, random_state=42).fit(data.drop(columns=["region","country","city"]))
-    clusters = model.labels_
+        logger.info("Displaying the first 10 rows of the admission table:")
+        data.show(10)
 
-    # Add clusters to the data frame as a new column
-    data["cluster"] = clusters
-    
-    # Return the data with the cluster information
-    return data
+        logger.info("Checking schema of the admission table...")
+        data.printSchema()
 
-@task
+        # Check for NULL values in the Average Bill Amount column
+        null_count = data.filter(data["Average Bill Amount"].isNull()).count()
+        logger.info(f"Number of NULL Average Bill Amounts: {null_count}")
+
+        # Create a temporary view for SQL queries
+        data.createOrReplaceTempView("admission")
+
+        # Extracting relevant data
+        test_sql = """
+            SELECT 
+                "Medical Condition", 
+                "Hospital", 
+                "Average Bill Amount"
+            FROM 
+                admission 
+            WHERE 
+                "Average Bill Amount" IS NOT NULL;
+        """
+        logger.info("Executing test SQL query...")
+        test_result = spark.sql(test_sql)
+        logger.info("Test SQL query executed successfully.")
+        test_result.show()
+
+        # Aggregate data using DataFrame API
+        aggregated_data = data.groupBy("Medical Condition", "Hospital") \
+            .agg(F.round(F.avg("Average Bill Amount"), 2).alias("Avg_Bill_Amount")) \
+            .orderBy("Avg_Bill_Amount", ascending=False)
+
+        logger.info("Aggregated data using DataFrame API:")
+        aggregated_data.show()
+
+        return aggregated_data
+
+    except Exception as e:
+        logger.error(f"Error during data extraction: {e}")
+        raise
+
+
+def create_model(data):
+    """Run KMeans clustering on the data."""
+    logger.info("Starting KMeans clustering...")
+
+    # Index the Hospital column
+    indexer = StringIndexer(inputCol="Hospital", outputCol="Hospital_Index")
+    data_indexed = indexer.fit(data).transform(data)
+
+    feature_columns = ["Avg_Bill_Amount", "Hospital_Index"]  # Use indexed column
+    logger.info(f"Feature columns used for clustering: {feature_columns}")
+
+    # Assemble feature vector
+    assembler = VectorAssembler(inputCols=feature_columns, outputCol="features")
+    data_with_features = assembler.transform(data_indexed)
+    logger.info("Feature vector assembled successfully.")
+
+    # Initialize and fit KMeans model
+    kmeans = KMeans(k=3, seed=42)
+    model = kmeans.fit(data_with_features)
+    logger.info("KMeans model fitted successfully.")
+
+    # Make predictions
+    predictions = model.transform(data_with_features)
+    logger.info("Predictions made successfully.")
+
+    return predictions.select("Avg_Bill_Amount", "Hospital", "prediction")
+
+
 def transform(data):
-    ''''
-    Transform the clusterized data by 
-    - calculating average temperatures
-    - setting cluster names based on how low or high the average is
-    '''
+    """Transform the clustered data to include billing categories."""
+    logger.info("Transforming clustered data...")
 
-    # Get average temperature per cluster
-    clusterMetadata = pandas.DataFrame({
-        "cluster": [0,1,2,3,4],
-        "avgtemp":
-            [data[data.cluster==0]["avgtemp"].mean(),
-            data[data.cluster==1]["avgtemp"].mean(),
-            data[data.cluster==2]["avgtemp"].mean(),
-            data[data.cluster==3]["avgtemp"].mean(),
-            data[data.cluster==4]["avgtemp"].mean()]
-            })
+    # Group by prediction and calculate average billing amount
+    cluster_metadata = data.groupBy("prediction").agg(F.mean("Avg_Bill_Amount").alias("Avg_Bill_Amount"))
+    cluster_metadata = cluster_metadata.orderBy("Avg_Bill_Amount")
 
-    # Set temperature level for each cluster sorted by temperature
-    clusterMetadata = clusterMetadata.sort_values(by='avgtemp')
-    clusterMetadata['templevel'] = ['Very Low','Low','Medium','High','Very High']
-
-    # Add level to main table
-    def setTempLevel(cluster):
-        level = clusterMetadata[clusterMetadata.cluster == cluster]['templevel'].iloc[0]
-        return str(level)
-    data['templevel'] = data.apply(lambda x : setTempLevel(x['cluster']) , axis=1)
-    
-    # Remove cluster column
-    data = data.drop(columns="cluster")
-    
-    # Return transformed clusterized data
-    return data
-
-@task
-def load(data):
-    ''''
-    Task to load the processed data into the database
-    '''
-
-    # Connect to the database
-    connection = psycopg2.connect(f"host='{dbconfig.HOST}' dbname='{dbconfig.DBNAME}' user='{dbconfig.USER}' password='{dbconfig.PASSWORD}'")
-    mycursor = connection.cursor()
-
-    # Iterate through each row and insert to the database
-    for index, row in data.iterrows():
-        # Prepare SQL query to INSERT a record into the database.
-        sql = "INSERT INTO temperature_level (region, country, city, quarter, avgtemp, templevel) VALUES ('%s', '%s', '%s', '%s', '%s', '%s');" % (row[0], row[1], row[2], row[3], row[4], row[5])
-
-        # Execute SQL statement + commit or rollback
-        try:
-            mycursor.execute(sql)
-            connection.commit()
-        except:
-            connection.rollback()
-
-    # Close database connection
-    connection.close()
-
-    # Log status message
-    dbstatus.logStatus(4, "ML 2/2 - Process completed")
-
-    return "--- Process successfully completed! ---"
-
-def main():
-    '''Set Prefect flow and execute schedule
-    NOTE: Schedule can be toggled between test mode and production mode
-    Test mode runs every 15 min while production mode runs every quarter
-    '''
-
-    # Get Execution Mode
-    interval=timedelta(minutes=15) # Test mode
-    if (os.environ['EXECUTION_MODE'] == 'production'):
-        interval=timedelta(days=90)  # Production mode
-
-    # Set Prefect scheduler to run every month
-    schedule = IntervalSchedule(
-        start_date=datetime.utcnow() + timedelta(seconds=1),
-        interval=interval
+    # Create billing categories based on average billing amount
+    cluster_metadata = cluster_metadata.withColumn(
+        "BillCat",
+        F.when(F.col("Avg_Bill_Amount") < 2000.00, "Low")
+        .when((F.col("Avg_Bill_Amount") >= 2000.00) & (F.col("Avg_Bill_Amount") < 4000.00), "Moderate")
+        .when((F.col("Avg_Bill_Amount") >= 4000.00) & (F.col("Avg_Bill_Amount") < 6000.00), "High")
+        .otherwise("Substantial")
     )
 
-    # Configure Prefect flow
-    with Flow("ml", schedule=schedule) as flow:
-        createTable() # Create/Clean up database table
-        data = extract()
-        data = createModel(data)
-        data = transform(data)
-        load(data)
+    logger.info("Joining cluster metadata with original data...")
+    data = data.join(cluster_metadata.select("prediction", "BillCat"), on="prediction", how="left")
+    logger.info("Data joined successfully. Dropping prediction column...")
 
-    # Execute ETL flow
-    flow.run(executor=LocalDaskExecutor())
+    # Rename columns to match database schema
+    data = data.withColumnRenamed("Avg_Bill_Amount", "Avg Bill Amount") \
+        .withColumnRenamed("BillCat", "Bill Cat")
+
+    return data.drop("prediction")
+
+
+def load(data):
+    """Load the processed data into the PostgreSQL database."""
+    logger.info("Preparing to load data into the database...")
+
+    db_url = f"jdbc:postgresql://{db_host}/{db_name}"
+    db_properties = {
+        "user": db_user,
+        "password": db_password,
+        "driver": "org.postgresql.Driver"
+    }
+
+    logger.info("Writing data to the Cat_Bill_Amount table...")
+
+    try:
+        # Write the DataFrame to the PostgreSQL table
+        data.write.jdbc(url=db_url, table="\"Cat Bill Amount\"", mode="append", properties=db_properties)
+        logger.info("Data loaded successfully.")
+    except Exception as e:
+        logger.error(f"Failed to load data: {e}")
+        raise
+
+    logger.info("Process completed successfully.")
+    return "--- Process successfully completed! ---"
+
+
+def main():
+    """Main entry point of the ETL process."""
+    create_table()
+    extracted_data = extract()
+
+    if extracted_data is not None:
+        logger.info("Extracted Data:")
+        extracted_data.show()
+
+        # Create the model using the extracted data
+        model = create_model(extracted_data)
+
+        # Log the model's predictions
+        logger.info("Model predictions:")
+        model.show()
+
+        # Transform the predictions to include billing categories
+        transformed_data = transform(model)
+
+        # Log the transformed data
+        logger.info("Transformed Data with Billing Categories:")
+        transformed_data.show()
+
+        # Load the transformed data into the database
+        load(transformed_data)
+
+        # Update the status table with the current quarter
+        current_quarter = (datetime.now().month - 1) // 3 + 1
+        dbstatus.logStatus(current_quarter, "ML process completed for the quarter.")
+
 
 if __name__ == "__main__":
     main()

@@ -1,14 +1,13 @@
-version: "3.9"
 services:
   db:
     image: "postgres:bullseye"
-    hostname: db
+    hostname: localhost
     ports:
       - "5432:5432"
     environment:
-      - POSTGRES_USER=etl
-      - POSTGRES_PASSWORD=etl
-      - POSTGRES_DB=db
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=2016
+      - POSTGRES_DB=hospital_admission
       - PGDATA=/var/lib/postgresql/data/pgdata
     volumes:
       - type: volume
@@ -16,7 +15,7 @@ services:
         target: /var/lib/postgresql/data
     restart: on-failure
     healthcheck:
-        test: pg_isready -U etl -d db
+        test: pg_isready -U postgres -d db
         interval: 30s
         timeout: 10s
         retries: 5

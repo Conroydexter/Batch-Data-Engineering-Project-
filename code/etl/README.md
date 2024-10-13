@@ -1,30 +1,24 @@
-# ETL Job Details
+# Objective and execution of the ETL pipeline
 
-The aim of this job is to extract the data from the source, execute a series of transformations so that it's ready to be used by the ML job, then load it to the database.
+The core mission is the extraction of data from the source(csv file), perform sequential transformations on the data in preparation for the ML executions to be carried out, and finally the data is loaded into a postgre database.
 
-The resulted table looks like the following:
+ The bill amount issued on discharge date for patients admitted to hospitals in the network are placed into  monthly averages via aggregation.
 
-![TemperatureETL](../../Images/TemperatureETL.png?raw=true "Temperature ETL")
+- A new column named quarter is added for the quarterly breakdown when conducting the ML executions.
 
-- Daily temperature records from the source data file are aggregated into monthly averages.
+- Several column that are not necessary for the investigation is dropped.
 
-- Observations with missing temperature data are removed.
+- The average billing amount is grouped by the columns Medical Condition, Hospital, Insurance Provider, Admission Type, and Discharge Date.
 
-- The `state` column is removed once there is only state information for the US.
+To check the last uploaded data, the Status table is employed. In addition, the database is loaded only with new data.
+The data in the table is deleted before a new full load (refreshed), to accomodate any failures that my result in an incomplete load. 
 
-- A new column `quarter` is added to the table so it can be used by the ML job.
-
-- Temperature data is converted from Fahrenheit to Celsius.
-
-Only new data is loaded to the database. The Status table is used for checking what was the last uploaded data.
-
-In case of incomplete loads caused by failures, the table is refreshed and all data deleted before a new full load is done.
 
 ## Schedule
 
-The job schedule depends on whether it is in Test Mode or Production Mode.
-- Test Mode = job runs every 15 min
-- Production Mode = job runs every month
+The execution schedule is  dependent on whether it is in Test Mode or Production Mode.
+- Test Mode = execution every 15 min
+- Production Mode = execution every month
 
 The execution mode can be toggled by changing the `EXECUTION_MODE` variable under `etl` in the [docker-compose.yaml](../../docker-compose.yaml) file
 

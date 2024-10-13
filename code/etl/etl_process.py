@@ -1,245 +1,233 @@
-from datetime import timedelta, datetime
+from datetime import datetime
 from dateutil.relativedelta import relativedelta
-from prefect import task, Flow
-from prefect.schedules import IntervalSchedule
-from prefect.executors import LocalDaskExecutor
-import psycopg2
-import pandas
-import dbconfig
-import dbstatus
+from pyspark.sql import SparkSession
+from pyspark.sql import functions as F
+from pyspark.sql.types import StructType, StructField, StringType, IntegerType, DecimalType, DateType
 import os
+import psycopg2
+from dotenv import load_dotenv
+import dbstatus  # Import the dbstatus module
 
-def createTable():
-    '''
-    Create the initial tables required by the ETL process
-        - temperatures table to store the main data
-        - status table to store process status
-    '''
-    # Open connection to the database
-    connection = psycopg2.connect(f"host='{dbconfig.HOST}' dbname='{dbconfig.DBNAME}' user='{dbconfig.USER}' password='{dbconfig.PASSWORD}'")
-    mycursor = connection.cursor()
-    
-    # Create table to store the temperatures data and status information
-    sql = """
-        create table IF NOT EXISTS temperatures (region varchar(50), country varchar(30), city varchar(50), quarter int, date date, avgtemp decimal );
-        create table IF NOT EXISTS status (id SERIAL, status int, message varchar(40), timestamp timestamp, lastloaded date );
-        """
-    
-    # Execute the SQL statement + commit or rollback
-    try:
-        mycursor.execute(sql)
-        connection.commit()
-    except:
-        connection.rollback()
-    
-    # Close connection
-    connection.close()
+# Load environment variables from .env file
+load_dotenv()
 
-def getLastDateLoaded():
-    ''''
-    Get the date of the last loaded temperature and clean incomplete loads
-    '''
-    # Open connection to the database
-    connection = psycopg2.connect(f"host='{dbconfig.HOST}' dbname='{dbconfig.DBNAME}' user='{dbconfig.USER}' password='{dbconfig.PASSWORD}'")
+# Accessing PostgreSQL environment variables
+db_name = os.getenv('POSTGRES_DB')
+db_user = os.getenv('POSTGRES_USER')
+db_password = os.getenv('POSTGRES_PASSWORD')
+db_host = os.getenv('DB_HOST')
+db_port = os.getenv('DB_PORT')
+
+# Initialize Spark session
+spark = SparkSession.builder \
+    .appName('Data_Engineering_Project') \
+    .config("spark.jars", "C:\\Users\\admin\\PycharmProjects\\Data_Engineering_Project\\code\\libs\\postgresql-42.7.4.jar") \
+    .getOrCreate()
+
+def create_table():
+    """Create the necessary tables for the ETL process."""
+    print("Creating tables...", flush=True)
+    connection = psycopg2.connect(dbname=db_name, user=db_user, password=db_password, host=db_host, port=db_port)
     cursor = connection.cursor()
-    
-    # Get the date of the last temperature loaded
+
+    # SQL commands to create the tables
+    sql = """
+        CREATE TABLE IF NOT EXISTS admission (
+            "Medical Condition" VARCHAR(60),
+            "Hospital" VARCHAR(60),
+            "Insurance Provider" VARCHAR(60),
+            "Average Bill Amount" NUMERIC(7, 2),
+            "Admission Type" VARCHAR(60),
+            "Quarter" INTEGER,  
+            "Discharge Date" DATE
+        );
+
+        CREATE TABLE IF NOT EXISTS status (
+            id SERIAL PRIMARY KEY,
+            status INT,
+            message VARCHAR(40),
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            lastloaded DATE
+        );
+    """
+    try:
+        cursor.execute(sql)
+        connection.commit()
+        print("Tables created successfully.", flush=True)
+    except Exception as e:
+        print(f"Error creating tables: {e}", flush=True)
+        connection.rollback()
+    finally:
+        cursor.close()
+        connection.close()
+
+def get_last_date_loaded():
+    """Retrieve the last loaded date and clean incomplete loads."""
+    connection = psycopg2.connect(dbname=db_name, user=db_user, password=db_password, host=db_host, port=db_port)
+    cursor = connection.cursor()
+
     cursor.execute("SELECT MAX(lastloaded) as lastloaded FROM status;")
-    lastLoaded = cursor.fetchone()[0]
+    last_loaded = cursor.fetchone()[0]
+    print(f"Last loaded date from status: {last_loaded}", flush=True)
 
-    # If it's the first run, set an initial date and remove any incomplete loads from temperatures table
-    if lastLoaded is None:
-        lastLoaded = '1970-01-01'
-        # Execute the SQL statement + commit or rollback
-        try:
-            cursor.execute("delete from temperatures;")
-            connection.commit()
-        except:
-            connection.rollback()
-    
-    # Close database connection
+    if last_loaded is None:
+        last_loaded = '2019-05-08'
+        print("No last loaded date found. Resetting to default date.", flush=True)
+        cursor.execute("DELETE FROM admission;")
+        connection.commit()
+        print("Cleared admission table.", flush=True)
+
+    cursor.close()
     connection.close()
+    print(f"Returning last loaded date: {last_loaded}", flush=True)
+    return last_loaded
 
-    # Return last loaded date
-    return lastLoaded
-
-@task(max_retries=3, retry_delay=timedelta(seconds=1))
 def extract():
-    ''''
-    Task to extract the source data from 2 parts of the file city_temperature.csv
-    '''
-    # Log status message
-    dbstatus.logStatus(1, "ETL 1/7 - Extraction started")
+    """Extract data from the healthcare_dataset.csv file."""
+    print("ETL 1/7 - Extraction started", flush=True)
+    dbstatus.logStatus(2, "Extraction started")  # Log extraction start
 
-    # Set dataframe datatypes
-    dtype={ "Region": "string", 
-            "Country": "string", 
-            "State": "string", 
-            "City": "string", 
-            "Month": int, 
-            "Day": int, 
-            "Year": int, 
-            "AvgTemperature": float}
+    # Define schema for the data
+    schema = StructType([
+        StructField("Name", StringType(), True),
+        StructField("Age", IntegerType(), True),
+        StructField("Gender", StringType(), True),
+        StructField("Blood Type", StringType(), True),
+        StructField("Medical Condition", StringType(), True),
+        StructField("Date of Admission", DateType(), True),
+        StructField("Doctor", StringType(), True),
+        StructField("Hospital", StringType(), True),
+        StructField("Insurance Provider", StringType(), True),
+        StructField("Billing Amount", DecimalType(precision=7, scale=2), True),
+        StructField("Room Number", IntegerType(), True),
+        StructField("Admission Type", StringType(), True),
+        StructField("Discharge Date", DateType(), True),
+        StructField("Medication", StringType(), True),
+        StructField("Test Results", StringType(), True)
+    ])
 
-    # Read both parts of the file
-    data1 = pandas.read_csv(
-        "etl/city_temperature-1.csv", 
-        dtype=dtype)
-    data2 = pandas.read_csv(
-        "etl/city_temperature-2.csv", 
-        dtype=dtype)
+    try:
+        data = spark.read.csv(r'C:\Users\admin\PycharmProjects\Data_Engineering_Project\data\healthcare_dataset.csv',
+                              header=True, schema=schema)
 
-    # Join both parts in the same data frame
-    data = pandas.concat([data1, data2])
+        if data is not None and data.count() > 0:
+            print("ETL 2/7 - Extraction completed successfully.", flush=True)
+            dbstatus.logStatus(2, "Extraction completed successfully")  # Log success
+            return data
+        else:
+            print("ETL extraction failed: No data found.", flush=True)
+            dbstatus.logStatus(2, "Extraction failed: No data found")  # Log failure
+            return None
+    except Exception as e:
+        print(f"ETL extraction failed: {e}", flush=True)
+        dbstatus.logStatus(2, f"Extraction failed: {e}")  # Log exception
+        return None
 
-    # Log status message
-    dbstatus.logStatus(1, "ETL 2/7 - Extraction completed")
-
-    # Return data from source
-    return data
-
-@task
 def transform(data):
-    ''''
-    Task to transform the source data
-    '''
-    # Log status message
-    dbstatus.logStatus(1, "ETL 3/7 - Transformation started")
+    """Transform the extracted data."""
+    print("ETL 3/7 - Transformation started", flush=True)
+    dbstatus.logStatus(2, "Transformation started")  # Log transformation start
 
-    # Remove -99 temperatures as it indicates data is not available
-    data = data.drop(data[data.AvgTemperature == -99].index)
+    # Remove unnecessary columns
+    try:
+        data = data.drop('Name', 'Age', 'Gender', 'Blood Type',
+                         'Date of Admission', 'Doctor', 'Room Number',
+                         'Medication', 'Test Results')
+        print("Unnecessary columns removed successfully.", flush=True)
+    except Exception as e:
+        print(f"Failed to remove columns: {e}", flush=True)
 
-    # Remove State and Day columns
-    data = data.drop(columns=['State', 'Day'])
+    # Calculate average billing amount
+    try:
+        data = data.groupBy("Medical Condition", "Hospital",
+                            "Insurance Provider", "Admission Type",
+                            "Discharge Date").agg(F.avg("Billing Amount").alias("Average Bill Amount"))
+        print("Average monthly billing amount calculated successfully.", flush=True)
+    except Exception as e:
+        print(f"Failed to calculate average billing amount: {e}", flush=True)
 
-    # Average temperatures by month rather than days 
-    data = data.groupby(['Region','Country','City','Year','Month'], as_index=False).mean()
+    # Add Quarter column
+    try:
+        data = data.withColumn("Quarter", ((F.month(data["Discharge Date"]) - 1) / 3).cast(IntegerType()) + 1)
+        print("Quarter column added successfully.", flush=True)
+    except Exception as e:
+        print(f"Failed to add Quarter column: {e}", flush=True)
 
-    # Convert Temperature from F to C
-    data['AvgTemperature'] = (data['AvgTemperature'] - 32) * 5 / 9
+    # Sort data by Discharge Date
+    try:
+        data = data.orderBy("Discharge Date")
+        print("Data sorted by Discharge Date successfully.", flush=True)
+    except Exception as e:
+        print(f"Failed to sort data: {e}", flush=True)
 
-    # Change temperatures precision to 2 decimal places
-    data['AvgTemperature'] = data['AvgTemperature'].round(decimals = 2)
-
-    # Add a column for Quarter
-    def setQuarter(month):
-        quarter = 0
-        if month <= 3:
-            quarter = 1
-        elif month <= 6:
-            quarter = 2
-        elif month <= 9:
-            quarter = 3
-        elif month <= 12:
-            quarter = 4
-        return quarter
-    data['Quarter'] = data.apply(lambda x : setQuarter(x['Month']) , axis=1)
-
-    # Join Year and Month as a new Date column
-    data["Date"] = data["Year"].astype(str) + "-" + data["Month"].astype(str) + "-01"
-    data["Date"] = pandas.to_datetime(data["Date"])
-
-    # Remove Year and Month columns
-    data = data.drop(columns=['Year', 'Month'])
-
-    # Sort data by Date
-    data = data.sort_values(by="Date")
-
-    # Log status message
-    dbstatus.logStatus(1, "ETL 4/7 - Transformation completed")
-
-    # Return transformed data
+    print("ETL 4/7 - Transformation completed", flush=True)
+    dbstatus.logStatus(2, "Transformation completed successfully")  # Log success
     return data
 
-@task
 def load(data):
-    ''''
-    Task to load the processed data into the database
-    '''
-    # Log status message
-    dbstatus.logStatus(1, "ETL 5/7 - Loading started")
+    """Load the transformed data into the database."""
+    print("ETL 5/7 - Loading started", flush=True)
+    dbstatus.logStatus(2, "Loading started")  # Log loading start
 
-    # Get last loaded timestamp
-    lastLoaded = str(getLastDateLoaded())
-    lastLoaded = datetime.strptime(lastLoaded, '%Y-%m-%d')
-    
-    # Add 1 month to the last loaded date to use as filter for the next load
-    lastLoaded = lastLoaded + relativedelta(months=1)
-    
-    # Filter out already loaded data
-    data = data[data.Date >= lastLoaded]
-    
-    # Connect to the database
-    connection = psycopg2.connect(f"host='{dbconfig.HOST}' dbname='{dbconfig.DBNAME}' user='{dbconfig.USER}' password='{dbconfig.PASSWORD}'")
-    mycursor = connection.cursor()
+    last_loaded = str(get_last_date_loaded())
+    last_loaded = datetime.strptime(last_loaded, '%Y-%m-%d') + relativedelta(months=1)
 
-    # Add counter to log number of rows loaded
-    loadCounter = 0
+    # Filter the data based on discharge date
+    data = data.filter(F.col("Discharge Date") >= last_loaded)
 
-    # Iterate through each row and insert to the database
-    for index, row in data.iterrows():
-        # Prepare SQL query to INSERT a record into the database.
-        sql = "INSERT INTO temperatures (region, country, city, avgtemp, quarter, date) VALUES ('%s', '%s', '%s', '%s', '%s', '%s');" % (row[0], row[1], row[2], row[3], row[4], row[5])
-        
-        # Execute SQL statement + commit or rollback
+    connection = psycopg2.connect(dbname=db_name, user=db_user, password=db_password, host=db_host, port=db_port)
+    cursor = connection.cursor()
+    load_counter = 0
+
+    for row in data.collect():
+        row_dict = row.asDict()
+        print(f"Available keys: {row_dict.keys()}", flush=True)
+
         try:
-            mycursor.execute(sql)
+            average_bill_amount = float(row_dict["Average Bill Amount"])
+        except KeyError as e:
+            print(f"KeyError: {e} - Available keys: {row_dict.keys()}", flush=True)
+            continue
+
+        sql = (
+            "INSERT INTO admission (\"Medical Condition\", \"Hospital\", \"Insurance Provider\", "
+            "\"Average Bill Amount\", \"Admission Type\", \"Quarter\", \"Discharge Date\") "
+            "VALUES ('%s', '%s', '%s', %.2f, '%s', '%s', '%s');"
+        ) % (
+            row_dict["Medical Condition"],
+            row_dict["Hospital"],
+            row_dict["Insurance Provider"],
+            average_bill_amount,
+            row_dict["Admission Type"],
+            row_dict["Quarter"],
+            row_dict["Discharge Date"]
+        )
+
+        print(f"Executing SQL: {sql}", flush=True)
+
+        try:
+            cursor.execute(sql)
             connection.commit()
-
-            # Always keep record of the latest date processed
-            if lastLoaded < row[5]:
-                lastLoaded = row[5]
-
-            # Count loaded row
-            loadCounter = loadCounter+1
-        
-        except:
+            load_counter += 1
+            print(f"Successfully loaded row: {row_dict['Medical Condition']} - {row_dict['Hospital']}", flush=True)
+        except Exception as e:
             connection.rollback()
+            print(f"Failed to load row: {row_dict['Medical Condition']} - {row_dict['Hospital']}. Error: {e}",
+                  flush=True)
 
-    # Close database connection
+    cursor.close()
     connection.close()
+    print("ETL 6/7 - Loading completed", flush=True)
+    dbstatus.logStatus(2, f"Loading completed, {load_counter} rows loaded")  # Log loading completion
+    print(f"ETL 7/7 - Loaded {load_counter} rows", flush=True)
 
-    # Log status message
-    dbstatus.logStatus(1, "ETL 6/7 - Loading completed")
-
-    # If nothing was loaded, last loaded date won't be logged
-    if loadCounter == 0:
-        lastLoaded = ''
-    
-    # Log status message
-    dbstatus.logStatus(2, f"ETL 7/7 - Loaded {loadCounter} rows", lastLoaded)
-    
     return "--- Process successfully completed! ---"
 
-def main():
-    '''
-    Set Prefect flow and execute schedule
-    NOTE: Schedule can be toggled between test mode and production mode
-    Test mode runs every 15 min while production mode runs every month
-    '''
-    
-    # Get Execution Mode
-    interval=timedelta(minutes=15) # Test mode
-    if (os.environ['EXECUTION_MODE'] == 'production'):
-        interval=timedelta(days=30)  # Production mode
-
-    # Set Prefect scheduler
-    schedule = IntervalSchedule(
-        start_date=datetime.utcnow() + timedelta(seconds=1),
-        interval=interval
-    )
-
-    # Configure Prefect flow
-    with Flow("etl", schedule=schedule) as flow:
-        data = extract()
-        data = transform(data)
-        load(data)
-
-    # Create database tables - if not already created
-    createTable()
-
-    # Execute ETL flow
-    flow.run(executor=LocalDaskExecutor())
-
 if __name__ == "__main__":
-    main()
+    # Run the ETL process
+    create_table()
+    last_loaded_date = get_last_date_loaded()
+    extracted_data = extract()
+    if extracted_data is not None:
+        transformed_data = transform(extracted_data)
+        load(transformed_data)

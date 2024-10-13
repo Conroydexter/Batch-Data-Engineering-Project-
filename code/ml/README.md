@@ -1,26 +1,25 @@
-# Machine Learning Job Details
+# Machine Learning Computations
 
-The aim of this job is to clusterize the data resulted from the ETL job by assigning each city and quarter combination to a temperature level.
+The main objective of the ML process is to perform clusterization on the data from the ETL process, then categories each hospital per quarter based on the bill amount issued to an admitted patient on the discharge date. 
 
-The temperature level can have a value of `Very Low`, `Low`, `Medium`, `High` or `Very High` and it regards which category that city is in that time of the year by considering the temperature and quarter.
+There are three categories that a bill amount can be assigned, Low, Medium, or High. 
 
-We would expect that cities in the northern hemisphere would have a lower temperature in the 1st and 4th quarters of the year, quarters in which temperatures in the southern hemisphere would be higher.
 
-![TemperatureEurope](../../Images/TemperatureEurope.png?raw=true "Temperature Europe")
+Assigning each cluster is accomplished by averaging the billing amount data for a given hospital aggregated by quarter.
+The process is carried out based on an algorithm which re-assign and re-load the data every quarter to ensure the most up-to-date cluster distribution.
 
-![TemperatureSouthAmerica](../../Images/TemperatureSouthAmerica.png?raw=true "Temperature SouthAmerica")
+## Execution
 
-The cluster assignment is done based on the average of all temperature data collected for that city aggregated by quarter. The algorithm will re-assign and re-load all data every quarter in order to have an updated version of the clusters.
+-The ETL process is first executed
+-The Machine Learning computation is executed after the ETL process is accomplished.
 
-This cluster information could be used in cases where we need to identify cities that contain higher/lower temperatures, considering the time of the year. Examples of such a use case would be ice cream sales and winter clothing advertisement.
-
-The ML job is only executed after the ETL job is completed, information that is verified by checking the status table.
+NOTE the status table is used for the verification of the execution steps.
 
 ## Schedule
 
-The job schedule depends on whether it is in Test Mode or Production Mode.
-- Test Mode = job runs every 15 min
-- Production Mode = job runs every quarter
+The execution schedule is dependent on whether it is in Test Mode or Production Mode.
+- Test Mode = Process executed every 15 min
+- Production Mode =  Executed quarterly
 
 The execution mode can be toggled by changing the `EXECUTION_MODE` variable under `ml` in the [docker-compose.yaml](../../docker-compose.yaml) file
 
