@@ -17,10 +17,10 @@ the aim is to gain insight into how the hospitals are charging for various medic
 # Project Implementation
 The implementation of the project is facilitated via the deployment of four docker containers:
 
-The Extract, Transform and Load process: has a data pipeline that is managed and executed through a Spark session with the conbination of Spark and Python (Pyspark), the ETL process executes the job based on a schedule to incrementally add new data with a monthly run.
-PostgreSQL database is combined with a docker named volume to persist data outside the container, with port 5432 exposed for external access.
-The Machine Learning process: through the Spark session the extraction of the processed data and the execution of the ML model clusterizies the data, sets the process to a quarterly schedule that labels the data and regenerates the table.
-Visualization: Utalizing Pyspark and the Bokeh library in a Spark session HTML pages containing the processed data from ETL and ML processes are created. To display the pages, the Nginx service is used through port 80.
+- The Extract, Transform and Load process: has a data pipeline that is managed and executed through a Spark session with the conbination of Spark and Python (Pyspark), the ETL process executes the job based on a schedule to incrementally add new data with a monthly run.
+- PostgreSQL database is combined with a docker named volume to persist data outside the container, with port 5432 exposed for external access.
+- The Machine Learning process: through the Spark session the extraction of the processed data and the execution of the ML model clusterizies the data, sets the process to a quarterly schedule that labels the data and regenerates the table.
+- Visualization: Utalizing Pyspark and the Bokeh library in a Spark session HTML pages containing the processed data from ETL and ML processes are created. To display the pages, the Nginx service is used through port 80.
 
 
 # Note:
@@ -39,7 +39,7 @@ git clone https://github.com/Conroydexter/Batch-Data-Engineering-Project-project
 
 - ii Go into the cloned repository folder:
 
-cd Data_Engineering_Project
+cd data_engineering_project
 
 - iii Execute the following docker-compose command to build the docker images:
 
