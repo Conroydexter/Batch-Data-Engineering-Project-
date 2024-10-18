@@ -1,23 +1,20 @@
-FROM prefecthq/prefect:latest-python3.9
+FROM python:3.9-slim
 
-# Install required packages
-RUN apt-get update && apt-get install -y \
-    default-jdk \
-    nginx \
-    curl \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
+# Install dependencies
+RUN apt-get update && \
+    apt-get install -y openjdk-17-jdk curl nginx && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Install Spark
-ENV SPARK_VERSION=3.3.1
-ENV HADOOP_VERSION=3.2
+ENV SPARK_VERSION=3.5.3
+ENV HADOOP_VERSION=3
 
-RUN curl -sL https://archive.apache.org/dist/spark/spark-$SPARK_VERSION/spark-$SPARK_VERSION-bin-hadoop$HADOOP_VERSION.tgz -o spark.tgz && \
+RUN curl -sL https://dlcdn.apache.org/spark/spark-$SPARK_VERSION/spark-$SPARK_VERSION-bin-hadoop$HADOOP_VERSION.tgz -o spark.tgz && \
     tar -xzf spark.tgz -C /opt/ && \
     ln -s /opt/spark-$SPARK_VERSION-bin-hadoop$HADOOP_VERSION /opt/spark && \
-    rm spark.tgz  # Clean up the tarball after extraction
+    rm spark.tgz
 
-# Set environment variables for Spark
+# Environment variables for Spark
 ENV SPARK_HOME=/opt/spark
 ENV PATH=$PATH:$SPARK_HOME/bin
 
@@ -28,13 +25,12 @@ RUN mkdir -p /app/htdocs /app/code
 WORKDIR /app/code
 
 # Copy application code and configuration
+COPY code/visualization/visualization-process.py /app/code/visualization-process.py
+COPY code/visualization/nginx_config/nginx.conf /etc/nginx/nginx.conf
 COPY code/ /app/code/
 COPY code/.env ./
-COPY dbconfig.py /app/code/
-COPY dbstatus.py /app/code/
-
-# Copy vnisualization files to Nginx's HTML directory
-COPY code /visualization/usr/share/nginx/html
+COPY dbstatus.py /app/
+COPY code/libs/postgresql-42.7.4.jar /opt/spark/jars/
 
 
 # Install Python dependencies
@@ -43,16 +39,10 @@ RUN pip install --no-cache-dir \
     pandas \
     pyspark \
     python-dotenv \
-    prefect \
-    prefect-dask \
     bokeh
-
-# Copy Nginx configuration
-COPY code/visualization/nginx.conf /etc/nginx/nginx.conf
-
 
 # Expose Nginx's port
 EXPOSE 80
 
 # Start Nginx and run the visualization script
-CMD service nginx start && python visualization-process.py
+CMD ["sh", "-c", "nginx && python visualization-process.py"]

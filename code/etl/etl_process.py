@@ -6,7 +6,7 @@ from pyspark.sql.types import StructType, StructField, StringType, IntegerType, 
 import os
 import psycopg2
 from dotenv import load_dotenv
-import dbstatus  # Import the dbstatus module
+import dbstatus
 
 # Load environment variables from .env file
 load_dotenv()
@@ -21,13 +21,13 @@ db_port = os.getenv('DB_PORT')
 # Initialize Spark session
 spark = SparkSession.builder \
     .appName('Data_Engineering_Project') \
-    .config("spark.jars", "C:\\Users\\admin\\PycharmProjects\\Data_Engineering_Project\\code\\libs\\postgresql-42.7.4.jar") \
+    .config("spark.jars", "/app/code/libs/postgresql-42.7.4.jar") \
     .getOrCreate()
 
 def create_table():
     """Create the necessary tables for the ETL process."""
     print("Creating tables...", flush=True)
-    connection = psycopg2.connect(dbname=db_name, user=db_user, password=db_password, host=db_host, port=db_port)
+    connection = psycopg2.connect(dbname=db_name, user=db_user, password=db_password, host='192.168.0.7', port=db_port)
     cursor = connection.cursor()
 
     # SQL commands to create the tables
@@ -107,7 +107,7 @@ def extract():
     ])
 
     try:
-        data = spark.read.csv(r'C:\Users\admin\PycharmProjects\Data_Engineering_Project\data\healthcare_dataset.csv',
+        data = spark.read.csv('/app/data/healthcare_dataset.csv',
                               header=True, schema=schema)
 
         if data is not None and data.count() > 0:
